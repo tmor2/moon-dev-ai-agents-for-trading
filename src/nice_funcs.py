@@ -68,6 +68,7 @@ def token_overview(address):
 
     response = requests.get(overview_url, headers=headers)
     result = {}
+ 
 
     if response.status_code == 200:
         overview_data = response.json().get('data', {})
@@ -108,6 +109,7 @@ def token_overview(address):
         watch = overview_data.get('watch', 0)
         view24h = overview_data.get('view24h', 0)
         liquidity = overview_data.get('liquidity', 0)
+        mc = overview_data.get('mc', 0)  # Get market cap
 
         # Add the retrieved data to result
         result.update({
@@ -116,6 +118,7 @@ def token_overview(address):
             'watch': watch,
             'view24h': view24h,
             'liquidity': liquidity,
+            'mc': mc  # Add market cap to result
         })
 
         # Extract and process description links if extensions are not None

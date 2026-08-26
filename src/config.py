@@ -92,6 +92,10 @@ STRATEGY_MIN_CONFIDENCE = 0.7  # Minimum confidence to act on strategy signals
 # Sleep time between main agent runs
 SLEEP_BETWEEN_RUNS_MINUTES = 15  # How long to sleep between agent runs 🕒
 
+# in our nice_funcs in token over view we look for minimum trades last hour
+MIN_TRADES_LAST_HOUR = 2
+
+
 # Future variables (not active yet) 🔮
 sell_at_multiple = 3
 USDC_SIZE = 1

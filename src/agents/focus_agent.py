@@ -15,35 +15,11 @@ from pathlib import Path
 project_root = str(Path(__file__).parent.parent.parent)
 if project_root not in sys.path:
     sys.path.append(project_root)
-from src.scripts.deepseek_local_call import LAMBDA_IP  # Import IP using absolute path since we added project root to sys.path
 
-# System prompt for focus analysis
-FOCUS_PROMPT = """
-You are Moon Dev's Focus AI Agent. Analyze the following transcript and:
-1. Rate focus level from 1-10 (10 being completely focused on coding)
-2. Provide ONE encouraging sentence to maintain/improve focus or a great quote to inspire to focus or keep pushing through hard times
-
-Consider:
-- Coding discussion = high focus
-- Trading analysis = high focus
-- Random chat/topics = low focus
-- Non-work discussion = low focus
-
-BE VERY STRICT WITH YOUR RATING, LIKE A DRILL SERGEANT. DONT GO EASY ON ME. I HAVE TO BE VERY FOCUSED, AND YOUR JOB IS TO MAKE ME VERY FOCUSED.
-
-RESPOND IN THIS EXACT FORMAT:
-X/10
-"Quote OR motivational sentence"
-"""
-
-# Model override settings
-# Set to "0" to use config.py's AI_MODEL setting
-# Available models:
-# - "deepseek-chat" (DeepSeek's V3 model - fast & efficient)
-# - "deepseek-reasoner" (DeepSeek's R1 reasoning model)
-# - "0" (Use config.py's AI_MODEL setting)
-MODEL_OVERRIDE = "deepseek-chat"  # Set to "0" to disable override
-DEEPSEEK_BASE_URL = "https://api.deepseek.com"  # Base URL for DeepSeek API
+# Load environment variables from the project root
+env_path = Path(project_root) / '.env'
+if not env_path.exists():
+    raise ValueError(f"🚨 .env file not found at {env_path}")
 
 import os
 import time as time_lib
@@ -53,17 +29,74 @@ import pyaudio
 import openai
 from anthropic import Anthropic
 from termcolor import cprint
-from pathlib import Path
 from dotenv import load_dotenv
 from random import randint, uniform
 import threading
 import pandas as pd
 import tempfile
 from src.config import *
+from src.models import model_factory
+import re
+import requests
 
-# Configuration
-MIN_INTERVAL_MINUTES = 4
-MAX_INTERVAL_MINUTES = 11
+# Load .env file explicitly from project root
+load_dotenv(dotenv_path=env_path)
+
+# Verify key loading
+cprint(f"\n🔍 Checking environment setup...", "cyan")
+cprint(f"📂 Project Root: {project_root}", "cyan")
+cprint(f"📝 .env Path: {env_path}", "cyan")
+
+# Available Model Types:
+# - "claude": Anthropic's Claude models
+# - "groq": Groq's hosted models
+# - "openai": OpenAI's GPT models
+# - "gemini": Google's Gemini models
+# - "deepseek": DeepSeek models
+# - "ollama": Local models through Ollama
+
+# Available Models by Type:
+# OpenAI Models:
+# - "gpt-4o": Latest GPT-4 Optimized (Best for complex reasoning)
+# - "gpt-4o-mini": Smaller, faster GPT-4 Optimized
+# - "o1": Latest O1 model - Shows reasoning process
+# - "o1-mini": Smaller O1 model
+# - "o3-mini": Brand new fast reasoning model
+
+# Claude Models:
+# - "claude-3-opus-20240229": Most powerful Claude
+# - "claude-3-sonnet-20240229": Balanced Claude
+# - "claude-3-haiku-20240307": Fast, efficient Claude
+
+# Gemini Models:
+# - "gemini-2.0-flash-exp": Next-gen multimodal
+# - "gemini-1.5-flash": Fast versatile model
+# - "gemini-1.5-flash-8b": High volume tasks
+# - "gemini-1.5-pro": Complex reasoning tasks
+
+# Groq Models:
+# - "mixtral-8x7b-32768": Mixtral 8x7B (32k context)
+# - "gemma2-9b-it": Google Gemma 2 9B
+# - "llama-3.3-70b-versatile": Llama 3.3 70B
+# - "llama-3.1-8b-instant": Llama 3.1 8B
+# - "llama-guard-3-8b": Llama Guard 3 8B
+
+# DeepSeek Models:
+# - "deepseek-chat": Fast chat model
+# - "deepseek-reasoner": Enhanced reasoning model
+
+# Ollama Models (Local, Free):
+# - "deepseek-r1": Best for complex reasoning
+# - "gemma:2b": Fast and efficient for simple tasks
+# - "llama3.2": Balanced model good for most tasks
+
+# Model override settings
+MODEL_TYPE = "claude"  # Choose from model types above
+MODEL_NAME = "claude-3-haiku-20240307"  # Choose from models above
+
+# Configuration for faster testing
+MIN_INTERVAL_MINUTES = 2  # Less than a second
+MAX_INTERVAL_MINUTES = 6  # About a second
 RECORDING_DURATION = 20  # seconds
 FOCUS_THRESHOLD = 8  # Minimum acceptable focus score
 AUDIO_CHUNK_SIZE = 2048
@@ -71,63 +104,87 @@ SAMPLE_RATE = 16000
 
 # Schedule settings
 SCHEDULE_START = time(5, 0)  # 5:00 AM
-SCHEDULE_END = time(13, 0)   # 1:00 PM
+SCHEDULE_END = time(18, 0)   # 3:00 PM
 
-# Voice settings (copied from whale agent)
+# Voice settings
 VOICE_MODEL = "tts-1"
-VOICE_NAME = "onyx" # Options: alloy, echo, fable, onyx, nova, shimmer
+VOICE_NAME = "onyx"  # Options: alloy, echo, fable, onyx, nova, shimmer
 VOICE_SPEED = 1
 
 # Create directories
 AUDIO_DIR = Path("src/audio")
 AUDIO_DIR.mkdir(parents=True, exist_ok=True)
 
+# Test transcript for debugging
+TEST_TRANSCRIPT = """Hey Moon Dev here, I'm working on implementing the new trading algorithm using Python. 
+The RSI calculations look good but I need to optimize the moving average calculations."""
+
+# Focus prompt optimized for all models
+FOCUS_PROMPT = """You are Moon Dev's Focus AI Agent. Your task is to analyze the following transcript and rate focus.
+
+IMPORTANT: DO NOT USE ANY MARKDOWN OR FORMATTING. RESPOND WITH PLAIN TEXT ONLY.
+
+RESPOND WITH EXACTLY TWO LINES:
+LINE 1: Just a number from 1-10 followed by '/10' (example: '8/10')
+LINE 2: One encouraging sentence (no quotes)
+
+Consider these ratings:
+- Coding discussion = high focus (8-10)
+- Trading analysis = high focus (8-10)
+- Random chat/topics = low focus (1-4)
+- Non-work discussion = low focus (1-4)
+
+EXAMPLE RESPONSE:
+8/10
+Keep crushing that code, Moon Dev! Your focus is leading to amazing results.
+
+TRANSCRIPT TO ANALYZE:
+{transcript}"""
 
 class FocusAgent:
     def __init__(self):
         """Initialize the Focus Agent"""
-        load_dotenv()
+        # Environment variables should already be loaded from project root
         
-        # Initialize OpenAI for voice and DeepSeek
+        self._announce_model()  # Announce at startup
+        
+        # Debug environment variables (without showing values)
+        for key in ["OPENAI_KEY", "ANTHROPIC_KEY", "GEMINI_KEY", "GROQ_API_KEY", "DEEPSEEK_KEY"]:
+            if os.getenv(key):
+                cprint(f"✅ Found {key}", "green")
+            else:
+                cprint(f"❌ Missing {key}", "red")
+        
+        # Initialize model using factory
+        self.model_factory = model_factory
+        self.model = self.model_factory.get_model(MODEL_TYPE, MODEL_NAME)
+        
+        if not self.model:
+            raise ValueError(f"🚨 Could not initialize {MODEL_TYPE} {MODEL_NAME} model! Check API key and model availability.")
+        
+        self._announce_model()  # Announce after initialization
+        
+        # Print model info with pricing if available
+        if MODEL_TYPE == "openai":
+            model_info = self.model.AVAILABLE_MODELS.get(MODEL_NAME, {})
+            cprint(f"\n💫 Moon Dev's Focus Agent using OpenAI!", "green")
+            cprint(f"🤖 Model: {model_info.get('description', '')}", "cyan")
+            cprint(f"💰 Pricing:", "yellow")
+            cprint(f"  ├─ Input: {model_info.get('input_price', '')}", "yellow")
+            cprint(f"  └─ Output: {model_info.get('output_price', '')}", "yellow")
+        
+        # Initialize voice client
         openai_key = os.getenv("OPENAI_KEY")
         if not openai_key:
             raise ValueError("🚨 OPENAI_KEY not found in environment variables!")
         self.openai_client = openai.OpenAI(api_key=openai_key)
-        
-        # Initialize local DeepSeek client if enabled
-        if USE_LOCAL_DEEPSEEK:
-            self.local_deepseek = openai.OpenAI(
-                api_key="not-needed",
-                base_url=f"http://{LAMBDA_IP}:8000/v1"
-            )
-            cprint("🚀 Moon Dev's Focus Agent using Local DeepSeek!", "green")
-        else:
-            self.local_deepseek = None
+
         
         # Initialize Anthropic for Claude models
         anthropic_key = os.getenv("ANTHROPIC_KEY")
         if not anthropic_key:
             raise ValueError("🚨 ANTHROPIC_KEY not found in environment variables!")
         self.anthropic_client = Anthropic(api_key=anthropic_key)
-        
-        # Set active model - use override if set, otherwise use config
-        self.active_model = MODEL_OVERRIDE if MODEL_OVERRIDE != "0" else AI_MODEL
-        
-        # Initialize DeepSeek client if needed
-        if "deepseek" in self.active_model.lower():
-            deepseek_key = os.getenv("DEEPSEEK_KEY")
-            if deepseek_key:
-                self.deepseek_client = openai.OpenAI(
-                    api_key=deepseek_key,
-                    base_url=DEEPSEEK_BASE_URL
-                )
-                cprint("🚀 Moon Dev's Focus Agent using DeepSeek override!", "green")
-            else:
-                self.deepseek_client = None
-                cprint("⚠️ DEEPSEEK_KEY not found - DeepSeek model will not be available", "yellow")
-        else:
-            self.deepseek_client = None
-            cprint(f"🎯 Moon Dev's Focus Agent using Claude model: {self.active_model}!", "green")
         
         # Initialize Google Speech client
         google_creds = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
@@ -171,8 +228,14 @@ class FocusAgent:
             encoding=speech.RecognitionConfig.AudioEncoding.LINEAR16,
             sample_rate_hertz=SAMPLE_RATE,
             language_code="en-US",
+            enable_automatic_punctuation=True,  # Add punctuation
+            model="latest_long",  # Use long-form model
+            use_enhanced=True  # Use enhanced model
         )
-        streaming_config = speech.StreamingRecognitionConfig(config=config)
+        streaming_config = speech.StreamingRecognitionConfig(
+            config=config,
+            interim_results=True  # Get interim results for better completeness
+        )
         
         def audio_generator():
             audio = pyaudio.PyAudio()
@@ -189,6 +252,8 @@ class FocusAgent:
                 while time_lib.time() - start_time < RECORDING_DURATION:
                     data = stream.read(AUDIO_CHUNK_SIZE, exception_on_overflow=False)
                     yield data
+                # Add a small silence at the end to ensure we get the last word
+                yield b'\x00' * AUDIO_CHUNK_SIZE
             finally:
                 stream.stop_stream()
                 stream.close()
@@ -211,12 +276,15 @@ class FocusAgent:
                     for result in response.results:
                         if result.is_final:
                             self.current_transcript.append(result.alternatives[0].transcript)
+            
+            # Small delay to ensure we get the complete transcript
+            time_lib.sleep(0.5)
                             
         except Exception as e:
             cprint(f"❌ Error recording audio: {str(e)}", "red")
         finally:
             self.is_recording = False
-            
+
     def _announce(self, message, force_voice=False):
         """Announce message with optional voice"""
         try:
@@ -255,103 +323,106 @@ class FocusAgent:
     def analyze_focus(self, transcript):
         """Analyze focus level from transcript"""
         try:
-            # Check if using local DeepSeek first
-            if USE_LOCAL_DEEPSEEK:
-                cprint("🤖 Using Local DeepSeek model", "cyan")
-                # For local DeepSeek, we need to be more explicit about the format
-                local_prompt = f"""You are Moon Dev's Focus AI Agent. Your task is to analyze the following transcript and respond in EXACTLY this format, with NO additional text:
-
-8/10
-"Your motivational quote or sentence here"
-
-DO NOT include any other text, tags, or formatting. Just those two lines.
-
-Analyze this transcript and rate focus from 1-10 (10 being completely focused):
-- Coding discussion = high focus (8-10)
-- Trading analysis = high focus (8-10)
-- Random chat/topics = low focus (1-4)
-- Non-work discussion = low focus (1-4)
-
-BE VERY STRICT WITH THE RATING.
-
-Here is the transcript to analyze:
-{transcript}"""
-
-                response = self.local_deepseek.chat.completions.create(
-                    model="deepseek-r1",
-                    messages=[
-                        {"role": "system", "content": "You are a strict focus analysis AI. Respond in the exact format specified."},
-                        {"role": "user", "content": local_prompt}
-                    ],
-                    stream=False
+            # Debug the input
+            cprint(f"\n🔍 Analyzing transcript:", "cyan")
+            cprint(f"  ├─ Length: {len(transcript)} chars", "cyan")
+            cprint(f"  └─ Content type check: {'chicken' in transcript.lower()}", "yellow")
+            
+            # For Ollama models
+            if MODEL_TYPE == "ollama":
+                cprint("\n🧠 Using Ollama model...", "cyan")
+                response = self.model.generate_response(
+                    system_prompt="You are Moon Dev's Focus AI. You analyze focus and provide ratings. NO MARKDOWN OR FORMATTING. RESPOND WITH EXACTLY TWO LINES: A SCORE LINE (X/10) AND ONE SINGLE ENCOURAGING SENTENCE.",
+                    user_content=FOCUS_PROMPT.format(transcript=transcript),
+                    temperature=0.7
                 )
-                raw_analysis = response.choices[0].message.content.strip()
+                
+                # Handle raw string response from Ollama
+                if isinstance(response, str):
+                    response_content = response
+                else:
+                    response_content = response.content if hasattr(response, 'content') else str(response)
                 
                 # Print raw response for debugging
-                cprint(f"\n📝 Raw model response:\n{raw_analysis}", "magenta")
+                cprint(f"\n📝 Raw model response:", "magenta")
+                cprint(f"══════════════════════════════", "magenta")
+                cprint(response_content, "yellow")
+                cprint(f"══════════════════════════════\n", "magenta")
                 
-                # Extract just the final response after any <think> tags
-                # Split on </think> and take the last part if it exists
-                if "</think>" in raw_analysis:
-                    analysis = raw_analysis.split("</think>")[-1].strip()
-                else:
-                    # If no think tags, look for the last occurrence of X/10 pattern
-                    lines = raw_analysis.split('\n')
-                    for i in range(len(lines)-1, -1, -1):
-                        if '/10' in lines[i]:
-                            analysis = '\n'.join(lines[i:i+2])
-                            break
+                # Improved response parsing
+                try:
+                    # Clean up the response and convert to lowercase for consistent parsing
+                    lines = [line.strip().lower() for line in response_content.split('\n') if line.strip()]
+                    
+                    # Look for score in any line
+                    score = None
+                    message = None
+                    
+                    for line in lines:
+                        # Remove any "line X:" prefixes (case insensitive)
+                        line = re.sub(r'^line\s*\d+:\s*', '', line, flags=re.IGNORECASE)
+                        
+                        # Try to find score
+                        if not score and re.search(r'\d+/10', line):
+                            score_match = re.search(r'(\d+)/10', line)
+                            if score_match:
+                                score = float(score_match.group(1))
+                                continue
+                        
+                        # If not a score line and not a system message, treat as message
+                        if not any(keyword in line for keyword in ['transcript', 'consider', 'respond', 'important']):
+                            # Get original case message from response_content
+                            original_lines = [l.strip() for l in response_content.split('\n') if l.strip()]
+                            for orig_line in original_lines:
+                                if re.sub(r'^line\s*\d+:\s*', '', orig_line, flags=re.IGNORECASE).lower() == line:
+                                    message = re.sub(r'^line\s*\d+:\s*', '', orig_line, flags=re.IGNORECASE)
+                                    break
+                    
+                    if score is not None and message:
+                        # Validate score range
+                        if not (1 <= score <= 10):
+                            score = max(1, min(10, score))  # Clamp between 1 and 10
+                        
+                        return score, message
                     else:
-                        analysis = raw_analysis  # Fallback to full response if no pattern found
+                        cprint(f"\n⚠️ Parsing Debug:", "yellow")
+                        cprint(f"  ├─ Score found: {score}", "yellow")
+                        cprint(f"  └─ Message found: {message}", "yellow")
+                        raise ValueError("Could not extract score and message")
+                    
+                except Exception as e:
+                    cprint(f"\n❌ Error in response parsing: {str(e)}", "red")
+                    return 5, "Error parsing focus analysis"  # Return middle score instead of 0
                 
-            # Otherwise use either DeepSeek API or Claude
-            elif "deepseek" in self.active_model.lower():
-                if not self.deepseek_client:
-                    raise ValueError("🚨 DeepSeek client not initialized - check DEEPSEEK_KEY")
-                client = self.deepseek_client
-                model = "deepseek-chat"
-                cprint(f"🤖 Using DeepSeek model: {model}", "cyan")
-                
-                # Make DeepSeek API call
-                response = client.chat.completions.create(
-                    model=model,
-                    messages=[
-                        {"role": "system", "content": FOCUS_PROMPT},
-                        {"role": "user", "content": transcript}
-                    ],
-                    max_tokens=AI_MAX_TOKENS,
-                    temperature=AI_TEMPERATURE,
-                    stream=False
-                )
-                analysis = response.choices[0].message.content.strip()
-            
             else:
-                # Use Claude with Anthropic client
-                cprint(f"🤖 Using Claude model: {self.active_model}", "cyan")
-                
-                # Make Anthropic API call
-                response = self.anthropic_client.messages.create(
-                    model=self.active_model,
-                    max_tokens=AI_MAX_TOKENS,
+                # Handle other model types (unchanged)
+                response = self.model.generate_response(
+                    system_prompt=FOCUS_PROMPT,
+                    user_content=transcript,
                     temperature=AI_TEMPERATURE,
-                    system=FOCUS_PROMPT,
-                    messages=[
-                        {"role": "user", "content": transcript}
-                    ]
+                    max_tokens=AI_MAX_TOKENS
                 )
-                analysis = response.content[0].text
-            
-            cprint(f"\n📝 Raw model response:\n{analysis}", "magenta")
-            
-            # Split into score and message
-            score_line, message = analysis.split('\n', 1)
-            score = float(score_line.split('/')[0])
-            
-            return score, message.strip()
-            
+                response_content = response.content
+                
+                # Parse the response
+                lines = response_content.split('\n')
+                if len(lines) >= 2:
+                    score_line = lines[0].strip()
+                    message = lines[1].strip()
+                    
+                    # Extract score
+                    score_match = re.search(r'(\d+)/10', score_line)
+                    if score_match:
+                        score = float(score_match.group(1))
+                        return score, message
+                
+                # If parsing fails, return default values
+                cprint("⚠️ Couldn't parse response, using default values", "yellow")
+                return 5, "Keep crushing it Moon Dev! Your focus is amazing!"
+                
         except Exception as e:
             cprint(f"❌ Error analyzing focus: {str(e)}", "red")
-            return 0, "Error analyzing focus"
+            return 5, "Error analyzing focus, but keep going Moon Dev!"  # Always return a tuple
 
     def _create_focus_log(self):
         """Create empty focus history CSV"""
@@ -383,8 +454,26 @@ Here is the transcript to analyze:
         except Exception as e:
             cprint(f"❌ Error logging focus data: {str(e)}", "red")
 
+    def _announce_model(self):
+        """Announce current model with eye-catching formatting"""
+        model_msg = f"🤖 TESTING MODEL: {MODEL_TYPE.upper()} - {MODEL_NAME} 🤖"
+        border = "=" * (len(model_msg) + 4)
+        
+        cprint(border, 'white', 'on_green', attrs=['bold'])
+        cprint(f"  {model_msg}  ", 'white', 'on_green', attrs=['bold'])
+        cprint(border, 'white', 'on_green', attrs=['bold'])
+
     def process_transcript(self, transcript):
         """Process transcript and provide focus assessment"""
+        # Announce model before processing
+        self._announce_model()
+        
+        # Print the transcript being sent to AI
+        cprint("\n📝 Transcript being analyzed:", "cyan")
+        cprint(f"══════════════════════════════", "cyan")
+        cprint(transcript, "yellow")
+        cprint(f"══════════════════════════════\n", "cyan")
+        
         score, message = self.analyze_focus(transcript)
         
         # Log the data
@@ -393,8 +482,8 @@ Here is the transcript to analyze:
         # Determine if voice announcement needed
         needs_voice = score < FOCUS_THRESHOLD
         
-        # Format message
-        formatted_message = f"{score}/10\n{message}"
+        # Format message - only include score and motivational message
+        formatted_message = f"{score}/10\n{message.strip()}"
         
         # Announce
         self._announce(formatted_message, force_voice=needs_voice)
@@ -402,8 +491,8 @@ Here is the transcript to analyze:
         return score
 
     def run(self):
-        """Main loop for random focus monitoring"""
-        cprint("\n🎯 Moon Dev's Focus Agent starting with random monitoring...", "cyan")
+        """Main loop for random monitoring"""
+        cprint("\n🎯 Moon Dev's Focus Agent starting with voice monitoring...", "cyan")
         cprint(f"⏰ Operating hours: {SCHEDULE_START.strftime('%I:%M %p')} - {SCHEDULE_END.strftime('%I:%M %p')}", "cyan")
         
         while True:
@@ -422,13 +511,15 @@ Here is the transcript to analyze:
                 time_lib.sleep(interval)
                 
                 # Start recording
-                cprint("\n🎤 Recording sample...", "cyan")
+                #cprint("\n🎤 Recording sample...", "cyan")
                 self.record_audio()
                 
                 # Process recording if we got something
                 if self.current_transcript:
                     full_transcript = ' '.join(self.current_transcript)
                     if full_transcript.strip():
+                        #cprint("\n🎯 Got transcript:", "green")
+                        #cprint(f"Length: {len(full_transcript)} chars", "cyan")
                         self.process_transcript(full_transcript)
                     else:
                         cprint("⚠️ No speech detected in sample", "yellow")
